@@ -1,68 +1,58 @@
 ----------------------- MODULE bully --------------------
-EXTENDS TLC, Integers, Sequences, FiniteSets, Randomization
+EXTENDS TLC, Integers, FiniteSets, Randomization
 
-CONSTANT PeersAmount \* число пиров в системе
+CONSTANT PeersAmount
 
 ASSUME PeersAmount \in Nat \ {0, 1}
 
-\* Множество всех ID узлов
 IDS == 1..PeersAmount
-
-\* Множество возможных значений в каналах обмена сообщениями
-Messages == {"", "Election", "OK", "Leader"}
 
 (* --algorithm bully
 variables 
-    \* ID отказавшего узла
     failed_leader = PeersAmount,
 
-    \* ID узла, который инициализировал проверку
-    \* Проверяются все возможные варианты (кроме того, когда инициатором становится отказавший)
     initiator \in IDS \ {failed_leader},
     
-    \* Некоторые подчиненные узлы также могут отказать
+    \* Some coordinated peers also can fail
     n \in 0..Cardinality(IDS \ {failed_leader, initiator}),
     others_who_failed = RandomSubset(n, IDS \ {failed_leader, initiator}),
 
-    \* Каналы передачи между каждой парой узлов (кроме канала к самому себе)
-    \* [отправитель][получатель]
+    \* Channel buffers between each pair of peers
     channels = [sender \in IDS |-> [receiver \in IDS \ {sender} |-> ""]],
     
-    \* Текущий лидер для каждого ID
+    \* Current leader for each peer
     leader = [id \in IDS |-> failed_leader];
   
 define 
-    \* Множество идентификаторов, которые больше заданного
     IDSBiggerThan  == [id_1 \in IDS |-> {id_2 \in IDS : id_2 > id_1}]
                 
-    \* Множество идентификаторов, которые меньше заданного
     IDSSmallerThan == [id_1 \in IDS |-> {id_2 \in IDS : id_2 < id_1}]
             
-    \* Множество идентификаторов, которые больше по ID (кроме отказавшего лидера)
-    IDSBiggerThanExceptFailedLeader == [id \in IDS |-> IDSBiggerThan[id] \ {failed_leader}]
+    IDSBiggerThanExceptFailedLeader == 
+        [id \in IDS |-> IDSBiggerThan[id] \ {failed_leader}]
 
-    \* Не получает ответ от узлов, которые больше него
-    \* (только в том случае, если они тоже отказали)
+    \* We don't need to wait for a timeout because we already know
+    \* which peers can't answer our requests.
     DoesNotReceiveAnyResponse(id) == 
         IDSBiggerThanExceptFailedLeader[id] \ others_who_failed = {}
     
-    \* множество ID узлов, которые объявили себя лидерами
+    \* Peers, that declared themselves as leaders to the receiver
     NewLeaders(receiver) == 
         {sender \in IDS \ {receiver} : channels[sender][receiver] = "Leader"}
 
-    \* Получает ли ответы от новых лидеров с большим ID
-    ReceivesResponseFromNewLeaders(receiver) == 
-        LET old_leader == leader[receiver]
-        IN
+    \* We don't need to wait for a timeout because we already know
+    \* which peers can't answer our requests.
+    DoesNotReceiveOKResponseFromNewLeaders(receiver) == 
+        LET old_leader == leader[receiver] IN
         \E new_leader \in IDSBiggerThanExceptFailedLeader[receiver] :
         /\ new_leader \notin others_who_failed
-        /\ IF old_leader = failed_leader THEN TRUE ELSE new_leader > old_leader
+        /\ IF old_leader = failed_leader THEN new_leader > old_leader ELSE TRUE
     
-    \* множество ID узлов, которые объявили голосование
+    \* Peers, that have sent "Election" requests to the receiver
     ElectionInitiators(receiver) == 
         {sender \in IDS \ {receiver} : channels[sender][receiver] = "Election"} 
 
-    \* множество узлов, которые прислали сообщения этому получателю    
+    \* Peers, that have sent any messages to the receiver
     MessageSenders(receiver) ==
         {sender \in IDS \ {receiver} : channels[sender][receiver] /= ""}
     
@@ -74,14 +64,11 @@ define
         CHOOSE new_leader \in WorkingIDS : 
         \A id \in WorkingIDS \ {new_leader} : new_leader > id
 
-    AllAliveIDSAreCoordinatedByNewLeader ==
+    AllWorkingIDSAreCoordinatedByNewLeader ==
         \A id \in WorkingIDS : leader[id] = IDThatShouldBecomeNewLeader
 
-    EventuallySolved == []<>AllAliveIDSAreCoordinatedByNewLeader
-
-    CorrectMessages == 
-        [](\A sender \in IDS : \A receiver \in IDS \ {sender} : channels[sender][receiver] \in Messages)
-
+    EventuallySolved == []<>AllWorkingIDSAreCoordinatedByNewLeader
+            
 end define;
 
 fair process Peer \in IDS
@@ -95,9 +82,9 @@ Initialize:
         goto NormalExecution;
     end if;
 
-\* Если никого с большим ID нет, то этот узел автоматически становится
-\* лидером и посылает всем остальным сообщение об этом.
-\* Иначе если он не с самым большим ID, то отсылает узлам сообщение о выборах.
+\* If there are no peers with ID bigger than this peer has, then he himself becomes 
+\* the new leader and sends "Leader" requests to all the other peers.
+\* Otherwise, the peer sends "Election" messages to peers that have bigger IDs.
 BecomeLeaderOrStartElection:
     if IDSBiggerThanExceptFailedLeader[self] = {} then
         leader[self] := self ||
@@ -111,9 +98,8 @@ BecomeLeaderOrStartElection:
             IF receiver \in IDSBiggerThan[self] THEN "Election" ELSE ""];
     end if;
 
-\* Если никто не отвечает на его запросы о выборах, 
-\* (возможно только в том случае, когда эти узлы тоже отказали)
-\* то этот узел сам становится лидером и посылает всем остальным сообщение об этом.
+\* If nobody responses to "Election" requests (timeout), then this peer becomes
+\* the new leader and sends "Leader" requests to all the other peers. 
 CheckElectionTimeout:
     if DoesNotReceiveAnyResponse(self) then
         leader[self] := self ||
@@ -123,10 +109,9 @@ CheckElectionTimeout:
         goto NormalExecution;
     end if;
 
-\* Принимает "OK" сообщения и делает отправителя своим лидером.
-\* Выполняется до тех пор, пока не узлы не перестанут посылать "OK".
+\* Receives "OK" responses from proclaimed leaders until it reachers timeout.
 CheckOkTimeout:
-    if ~ReceivesResponseFromNewLeaders(self) then
+    if DoesNotReceiveOKResponseFromNewLeaders(self) then
         goto NormalExecution;
     end if;
 AcceptNewLeader:
@@ -136,8 +121,7 @@ AcceptNewLeader:
         goto CheckOkTimeout;
     end with;
 
-\* В любой момент узел может получить сообщение о начале голосования.
-\* При его получении он отправляет "OK" и сам пытается стать лидером.
+\* If the peer receives "Election" request, he sends "OK" response and then acts like initiator
 NormalExecution:
     with sender \in MessageSenders(self) do
         if channels[sender][self] = "Election" then
@@ -145,8 +129,8 @@ NormalExecution:
             channels[sender][self] := "";
             goto BecomeLeaderOrStartElection;
         elsif channels[sender][self] = "Leader" then
-            channels[sender][self] := "" ||
-            leader[self] := sender;
+            leader[self] := sender ||
+            channels[sender][self] := "";
             goto NormalExecution;
         else
             channels[sender][self] := "";
@@ -155,22 +139,20 @@ NormalExecution:
 
 Failed:
     skip;
-
 end process;
 
 end algorithm *)
-\* BEGIN TRANSLATION (chksum(pcal) = "57599cbe" /\ chksum(tla) = "fd905753")
+\* BEGIN TRANSLATION (chksum(pcal) = "499ab1c7" /\ chksum(tla) = "70ed46e0")
 VARIABLES failed_leader, initiator, n, others_who_failed, channels, leader, 
           pc
 
 (* define statement *)
 IDSBiggerThan  == [id_1 \in IDS |-> {id_2 \in IDS : id_2 > id_1}]
 
-
 IDSSmallerThan == [id_1 \in IDS |-> {id_2 \in IDS : id_2 < id_1}]
 
-
-IDSBiggerThanExceptFailedLeader == [id \in IDS |-> IDSBiggerThan[id] \ {failed_leader}]
+IDSBiggerThanExceptFailedLeader ==
+    [id \in IDS |-> IDSBiggerThan[id] \ {failed_leader}]
 
 
 
@@ -182,12 +164,12 @@ NewLeaders(receiver) ==
     {sender \in IDS \ {receiver} : channels[sender][receiver] = "Leader"}
 
 
-ReceivesResponseFromNewLeaders(receiver) ==
-    LET old_leader == leader[receiver]
-    IN
+
+DoesNotReceiveOKResponseFromNewLeaders(receiver) ==
+    LET old_leader == leader[receiver] IN
     \E new_leader \in IDSBiggerThanExceptFailedLeader[receiver] :
     /\ new_leader \notin others_who_failed
-    /\ IF old_leader = failed_leader THEN TRUE ELSE new_leader > old_leader
+    /\ IF old_leader = failed_leader THEN new_leader > old_leader ELSE TRUE
 
 
 ElectionInitiators(receiver) ==
@@ -205,13 +187,10 @@ IDThatShouldBecomeNewLeader ==
     CHOOSE new_leader \in WorkingIDS :
     \A id \in WorkingIDS \ {new_leader} : new_leader > id
 
-AllAliveIDSAreCoordinatedByNewLeader ==
+AllWorkingIDSAreCoordinatedByNewLeader ==
     \A id \in WorkingIDS : leader[id] = IDThatShouldBecomeNewLeader
 
-EventuallySolved == []<>AllAliveIDSAreCoordinatedByNewLeader
-
-CorrectMessages ==
-    [](\A sender \in IDS : \A receiver \in IDS \ {sender} : channels[sender][receiver] \in Messages)
+EventuallySolved == []<>AllWorkingIDSAreCoordinatedByNewLeader
 
 
 vars == << failed_leader, initiator, n, others_who_failed, channels, leader, 
@@ -262,7 +241,7 @@ CheckElectionTimeout(self) == /\ pc[self] = "CheckElectionTimeout"
                                               others_who_failed >>
 
 CheckOkTimeout(self) == /\ pc[self] = "CheckOkTimeout"
-                        /\ IF ~ReceivesResponseFromNewLeaders(self)
+                        /\ IF DoesNotReceiveOKResponseFromNewLeaders(self)
                               THEN /\ pc' = [pc EXCEPT ![self] = "NormalExecution"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "AcceptNewLeader"]
                         /\ UNCHANGED << failed_leader, initiator, n, 
