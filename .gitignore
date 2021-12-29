@@ -3,6 +3,6 @@
 *.log
 *.old
 *.out
-*.pdf
+# *.pdf
 *.tex
 states
